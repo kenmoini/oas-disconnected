@@ -118,7 +118,7 @@ export ASSISTED_SERVICE_ENDPOINT="${ASSISTED_SERVICE_PROTOCOL}://${ASSISTED_SERV
 export ASSISTED_SERVICE_V1_API_PATH="/api/assisted-install/v1"
 export ASSISTED_SERVICE_V1_API="${ASSISTED_SERVICE_ENDPOINT}${ASSISTED_SERVICE_V1_API_PATH}"
 
-export LOCAL_REGISTRY="${MIRROR_VM_HOSTNAME}:5000"
+export LOCAL_REGISTRY="${MIRROR_VM_HOSTNAME}"
 export LOCAL_REPOSITORY="ocp4/openshift4"
 export PRODUCT_REPO="openshift-release-dev"
 export LOCAL_SECRET_JSON="${MIRROR_DIR}/auth/compiled-pull-secret.json"
@@ -523,16 +523,6 @@ zones:
           ttl: 6400
           value: $MIRROR_VM_ISOLATED_BRIDGE_IFACE_IP
 
-        - name: $ISOLATED_AI_SVC_WEB_UI_HOSTNAME
-          ttl: 6400
-          value: $ISOLATED_AI_SVC_WEB_UI_IP
-        - name: $ISOLATED_AI_SVC_API_HOSTNAME
-          ttl: 6400
-          value: $ISOLATED_AI_SVC_API_IP
-        - name: $ISOLATED_AI_SVC_DB_HOSTNAME
-          ttl: 6400
-          value: $ISOLATED_AI_SVC_DB_IP
-
         - name: $ISOLATED_AI_SVC_ENDPOINT
           ttl: 6400
           value: $ISOLATED_AI_SVC_HAPROXY_IP
@@ -666,7 +656,7 @@ ExecStart=/usr/bin/podman run --name mirror-registry --net host \
   -v ${MIRROR_DIR}/auth:/auth:z \
   -v ${MIRROR_DIR}/pki:/certs:z \
   -v ${MIRROR_DIR}/downloads/images:/var/lib/registry:z \
-  -e "REGISTRY_HTTP_ADDR=$LOCAL_REGISTRY" \
+  -e "REGISTRY_HTTP_ADDR=0.0.0.0:443" \
   -e "REGISTRY_AUTH=htpasswd" \
   -e "REGISTRY_AUTH_HTPASSWD_REALM=registry-realm" \
   -e "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd" \
@@ -684,6 +674,7 @@ RestartSec=30
 [Install]
 WantedBy=multi-user.target
 EOF
+#-e "REGISTRY_HTTP_ADDR=$LOCAL_REGISTRY" \
 NEW_SUM_REG_SVC=$(md5sum /etc/systemd/system/mirror-registry.service)
 
 ## Start the Registry
@@ -713,10 +704,18 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+echo "  Testing the Isolated Mirrored Docker Registry..." 2>&1 | tee -a $LOG_FILE
+REG_TEST=$(curl -sSL --fail -u $MIRROR_CONTAINER_REGISTRY_USER:$MIRROR_CONTAINER_REGISTRY_PASS https://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/v2/_catalog)
+if [ $? -ne 0 ]; then
+  echo "ERROR: Docker Registry not reachable" 2>&1 | tee -a $LOG_FILE
+  exit 1
+fi
+
 ########################################################################################################################
 ##  Create formatted Pull Secrets
 echo "  Creating Pull Secret file for Mirrored Docker Registry..." 2>&1 | tee -a $LOG_FILE
 podman login --authfile "${MIRROR_DIR}/auth/mirror-pull-secret.json" -u $MIRROR_CONTAINER_REGISTRY_USER -p $MIRROR_CONTAINER_REGISTRY_PASS $LOCAL_REGISTRY &>> $LOG_FILE
+podman login --authfile "${MIRROR_DIR}/auth/mirror-pull-secret.json" -u $MIRROR_CONTAINER_REGISTRY_USER -p $MIRROR_CONTAINER_REGISTRY_PASS $LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN &>> $LOG_FILE
 #podman login --authfile "${MIRROR_DIR}/auth/mirror-pull-secret.json" -u $MIRROR_CONTAINER_REGISTRY_USER -p $MIRROR_CONTAINER_REGISTRY_PASS $MIRROR_VM_HOSTNAME:5000 &>> $LOG_FILE
 #podman login --authfile "${MIRROR_DIR}/auth/mirror-pull-secret.json" -u $MIRROR_CONTAINER_REGISTRY_USER -p $MIRROR_CONTAINER_REGISTRY_PASS $MIRROR_VM_ISOLATED_BRIDGE_IFACE_IP:5000 &>> $LOG_FILE
 
@@ -726,9 +725,11 @@ jq '.auths[] += {"email": "admin@isolated.local"}' "${MIRROR_DIR}/auth/mirror-pu
 echo "  Compiling Pull Secrets..." 2>&1 | tee -a $LOG_FILE
 jq -s '{"auths": ( .[0].auths + .[1].auths ) }' ${PULL_SECRET_PATH} ${MIRROR_DIR}/auth/mirror-pull-secret-email-formatted.json > ${MIRROR_DIR}/auth/compiled-pull-secret.json
 
-echo "'" > ${MIRROR_DIR}/auth/wrapped-ocp-pull-secret.json
-jq -Mc '.' ${PULL_SECRET_PATH} >> ${MIRROR_DIR}/auth/wrapped-ocp-pull-secret.json
-echo "'" >> ${MIRROR_DIR}/auth/wrapped-ocp-pull-secret.json
+JSON_MINIFIED=$(jq -Mc '.' $PULL_SECRET_PATH)
+echo "'$JSON_MINIFIED'" > ${MIRROR_DIR}/auth/wrapped-ocp-pull-secret.json
+
+JSON_MINIFIED=$(jq -Mc '.' ${MIRROR_DIR}/auth/mirror-pull-secret.json)
+echo "'$JSON_MINIFIED'" > ${MIRROR_DIR}/auth/wrapped-mirror-pull-secret.json
 
 JSON_MINIFIED=$(jq -Mc '.' ${MIRROR_DIR}/auth/compiled-pull-secret.json)
 echo "'$JSON_MINIFIED'" > ${MIRROR_DIR}/auth/wrapped-compiled-pull-secret.json
@@ -930,10 +931,10 @@ echo "  Stable Assisted Service images mirrored!" 2>&1 | tee -a $LOG_FILE
 ########################################################################################################################
 ## Bake the configuration files needed for the Assisted Installer Service
 echo -e "\n===== Generating Assisted Service configuration files..." 2>&1 | tee -a $LOG_FILE
-CONTROLLER_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY/ocpmetal/assisted-installer-controller:latest | jq -r '.Digest')
-AGENT_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY/ocpmetal/assisted-installer-agent:latest | jq -r '.Digest')
-INSTALLER_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY/ocpmetal/assisted-installer:latest | jq -r '.Digest')
-INSTALL_RELEASE_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY/ocp4/openshift4:${LATEST_VERSION_FULL}-x86_64 | jq -r '.Digest')
+CONTROLLER_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer-controller:latest | jq -r '.Digest')
+AGENT_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer-agent:latest | jq -r '.Digest')
+INSTALLER_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer:latest | jq -r '.Digest')
+INSTALL_RELEASE_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocp4/openshift4:${LATEST_VERSION_FULL}-x86_64 | jq -r '.Digest')
 echo "  Using Digests:" 2>&1 | tee -a $LOG_FILE
 echo "  - assisted-installer: $INSTALLER_DIGEST" 2>&1 | tee -a $LOG_FILE
 echo "  - assisted-installer-agent: $AGENT_DIGEST" 2>&1 | tee -a $LOG_FILE
@@ -987,18 +988,17 @@ if [[ -f "\$FILE_CHECK" ]]; then
 fi
 
 # Create Pod and deploy containers
-echo -e "Deploying Pods...\n"
+#echo -e "Deploying Pods...\n"
 #podman pod create --name mirror-ingress --network $MIRROR_VM_ISOLATED_BRIDGE_IFACE --ip "${ISOLATED_AI_SVC_HAPROXY_IP}" -p 80/tcp -p 443/tcp
 #podman pod create --name mirror-websrv --network $MIRROR_VM_ISOLATED_BRIDGE_IFACE --ip "${ISOLATED_AI_SVC_NGINX_IP}" -p 8080/tcp
-
-sleep 3
+#sleep 3
 
 # Deploy Nginx
 echo -e "Deploying Nginx...\n"
 podman run -dt --name mirror-websrv --network $MIRROR_VM_ISOLATED_BRIDGE_IFACE --ip "${ISOLATED_AI_SVC_NGINX_IP}" -p 8080/tcp \
  -m 1024m --authfile ${MIRROR_DIR}/auth/compiled-pull-secret.json \
  -v ${MIRROR_DIR}/downloads:/usr/share/nginx/html/pub/downloads -v ${MIRROR_DIR}/mirror-ingress/nginx/templates:/etc/nginx/templates \
- -e "NGINX_PORT=8080" $LOCAL_REGISTRY/library/nginx:latest
+ -e "NGINX_PORT=8080" $LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/library/nginx:latest
 
 sleep 3
 
@@ -1008,7 +1008,7 @@ podman run -dt --sysctl net.ipv4.ip_unprivileged_port_start=0 --name mirror-ingr
  -m 1024m \
  --authfile ${MIRROR_DIR}/auth/compiled-pull-secret.json \
  -v ${MIRROR_DIR}/mirror-ingress/haproxy:/usr/local/etc/haproxy:ro -v ${MIRROR_DIR}/pki:/usr/local/etc/certs:ro \
- $LOCAL_REGISTRY/library/haproxy:latest
+ $LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/library/haproxy:latest
 EOF
 echo "  Mirror Ingress start script created!" 2>&1 | tee -a $LOG_FILE
 
@@ -1072,8 +1072,8 @@ frontend http
   redirect scheme https code 301 if !is_well_known !{ ssl_fc }
 
 frontend https
+  mode tcp
   bind *:443 ssl crt-list /usr/local/etc/haproxy/crt-list.cfg
-  http-response set-header Strict-Transport-Security "max-age=16000000; includeSubDomains; preload;"
 
   acl host_ai_svc_api hdr(host) -i $ISOLATED_AI_SVC_API_HOSTNAME.$ISOLATED_NETWORK_DOMAIN
   acl host_ai_svc_web hdr(host) -i $ISOLATED_AI_SVC_WEB_UI_HOSTNAME.$ISOLATED_NETWORK_DOMAIN
@@ -1090,20 +1090,26 @@ frontend https
   default_backend mirrorhttp
 
 backend mirrorhttp
+  mode http
   server backend1 $ISOLATED_AI_SVC_NGINX_IP:8080
   http-request add-header X-Forwarded-Proto https if { ssl_fc }
+  http-response set-header Strict-Transport-Security "max-age=16000000; includeSubDomains; preload;"
 
 backend registry
-  server registry1 $MIRROR_VM_ISOLATED_BRIDGE_IFACE_IP:5000
-  http-request add-header X-Forwarded-Proto https if { ssl_fc }
+  mode tcp
+  server registry1 $MIRROR_VM_ISOLATED_BRIDGE_IFACE_IP:443
 
 backend aiapi
+  mode http
   server aiapi1 $ISOLATED_AI_SVC_API_IP:8090
   http-request add-header X-Forwarded-Proto https if { ssl_fc }
+  http-response set-header Strict-Transport-Security "max-age=16000000; includeSubDomains; preload;"
 
 backend aiwebui
-  server aiwebui1 $ISOLATED_AI_SVC_WEB_UI_IP:8080
+  mode http
+  server aiwebui1 $ISOLATED_AI_SVC_API_IP:8080
   http-request add-header X-Forwarded-Proto https if { ssl_fc }
+  http-response set-header Strict-Transport-Security "max-age=16000000; includeSubDomains; preload;"
 EOF
 echo "  Mirror Ingress HAProxy configuration generated!" 2>&1 | tee -a $LOG_FILE
 
@@ -1120,6 +1126,7 @@ server {
 
     location / {
         root   /usr/share/nginx/html;
+        index mirror-index.html;
         autoindex on;
         autoindex_format html;
         autoindex_exact_size off;
@@ -1201,25 +1208,57 @@ RELEASE_IMAGES=$(cat ${MIRROR_DIR}/downloads/rhcos/release_images.json)
 
 # (OLD INFO NEED TO UPDATE)
 # Uncomment the below lines for restricted network install, requires pulling by digest
-#CONTROLLER_IMAGE=quay.io/ocpmetal/assisted-installer-controller@sha256:180d8b8e0381e6498434b2e3e88dc4874e9235827c8d2647cabf88f4bdf50c52
-#OPENSHIFT_INSTALL_RELEASE_IMAGE=quay.io/openshift-release-dev/ocp-release@sha256:8a9e40df2a19db4cc51dc8624d54163bef6e88b7d88cc0f577652ba25466e338
-OPENSHIFT_INSTALL_RELEASE_IMAGE_MIRROR=$LOCAL_REGISTRY/ocp4/openshift4@${INSTALL_RELEASE_DIGEST}
-AGENT_DOCKER_IMAGE=$LOCAL_REGISTRY/ocpmetal/assisted-installer-agent:@${AGENT_DIGEST}
-INSTALLER_IMAGE=$LOCAL_REGISTRY/ocpmetal/assisted-installer:@${INSTALLER_DIGEST}
-CONTROLLER_IMAGE=$LOCAL_REGISTRY/ocpmetal/assisted-installer-controller:@${CONTROLLER_DIGEST}
+## Setting these breaks the OAS API, causes a pull secret validation error for some forsaken reason...
+#CONTROLLER_IMAGE="quay.io/ocpmetal/assisted-installer-controller@sha256:180d8b8e0381e6498434b2e3e88dc4874e9235827c8d2647cabf88f4bdf50c52"
+#OPENSHIFT_INSTALL_RELEASE_IMAGE="quay.io/openshift-release-dev/ocp-release@${INSTALL_RELEASE_DIGEST}"
+#OPENSHIFT_INSTALL_RELEASE_IMAGE_MIRROR="$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocp4/openshift4@${INSTALL_RELEASE_DIGEST}"
+#AGENT_DOCKER_IMAGE="$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer-agent:@${AGENT_DIGEST}"
+#INSTALLER_IMAGE="$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer:@${INSTALLER_DIGEST}"
+#CONTROLLER_IMAGE="$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer-controller:@${CONTROLLER_DIGEST}"
 
 # Uncomment to avoid pull-secret requirement for quay.io on restricted network installs
-PUBLIC_CONTAINER_REGISTRIES=quay.io,mirror-vm:5000
-#PUBLIC_CONTAINER_REGISTRIES=quay.io,registry.access.redhat.com,registry.redhat.io
+PUBLIC_CONTAINER_REGISTRIES="quay.io,registry.access.redhat.com,registry.redhat.io,mirror-vm"
 
 # Format has changed for HW validation (Link: https://github.com/openshift/assisted-service/blob/master/onprem-environment#L19)
 HW_VALIDATOR_REQUIREMENTS=[{"version":"default","master":{"cpu_cores":4,"ram_mib":16384,"disk_size_gb":120,"installation_disk_speed_threshold_ms":10,"network_latency_threshold_ms":100,"packet_loss_percentage":0},"worker":{"cpu_cores":2,"ram_mib":8192,"disk_size_gb":120,"installation_disk_speed_threshold_ms":10,"network_latency_threshold_ms":1000,"packet_loss_percentage":10},"sno":{"cpu_cores":8,"ram_mib":32768,"disk_size_gb":120,"installation_disk_speed_threshold_ms":10}}]
 
-PULL_SECRET="/ocp-pull-secret.json"
-#PULL_SECRET=$(cat ${MIRROR_DIR}/auth/wrapped-compiled-pull-secret.json)
+# Just a base64 encoded version of the un:pw
+#PULL_SECRET="$(base64 <<< "${MIRROR_CONTAINER_REGISTRY_USER}:${MIRROR_CONTAINER_REGISTRY_PASSWORD}")"
+# Raw Original OCP pull-secret
+#PULL_SECRET=$(jq -Mc '.' $PULL_SECRET_PATH)
+# Raw mirror-only PS
+#PULL_SECRET=$(jq -Mc '.' ${MIRROR_DIR}/auth/mirror-pull-secret-email-formatted.json)
+# Raw compiled PS
+#PULL_SECRET=$(jq -Mc '.' ${MIRROR_DIR}/auth/compiled-pull-secret.json)
+
+# Inline Double-quote escaped original OCP PS
+#PULL_SECRET=$(jq -Mc '. | tostring' $PULL_SECRET_PATH)
+# Inline Double-quote escaped mirror-only PS
+#PULL_SECRET=$(jq -Mc '. | tostring' $MIRROR_DIR/auth/mirror-pull-secret-email-formatted.json)
+# Inline Double-quote escaped compiled PS
 #PULL_SECRET=$(jq -Mc '. | tostring' $MIRROR_DIR/auth/compiled-pull-secret.json)
+
+# Inline Single-quote wrapped original OCP PS
+#PULL_SECRET=$(cat ${MIRROR_DIR}/auth/wrapped-ocp-pull-secret.json)
+# Inline Single-quote wrapped mirror-only PS
 #PULL_SECRET=$(cat ${MIRROR_DIR}/auth/wrapped-mirror-pull-secret.json)
-#PULL_SECRET=$(jq -Mc '. | tostring' $MIRROR_DIR/auth/mirror-pull-secret.json)
+# Inline Single-quote wrapped compiled PS
+#PULL_SECRET=$(cat ${MIRROR_DIR}/auth/wrapped-compiled-pull-secret.json)
+
+# In-container reference to raw original OCP PS
+#PULL_SECRET="/ocp-pull-secret.json"
+# In-container reference to raw mirror-only PS
+#PULL_SECRET="/mirror-pull-secret-email-formatted.json"
+# In-container reference to raw compiled PS
+#PULL_SECRET="/compiled-pull-secret.json"
+
+# In-container reference to Single-quote wrapped original OCP PS
+#PULL_SECRET="/wrapped-ocp-pull-secret.json"
+# In-container reference to Single-quote wrapped mirror-only PS
+#PULL_SECRET="/wrapped-mirror-pull-secret.json"
+# In-container reference to Single-quote wrapped compiled PS
+#PULL_SECRET="/wrapped-compiled-pull-secret.json"
+
 #BASE_DNS_DOMAINS=
 #IMAGE_BUILDER=
 #CONNECTIVITY_CHECK_IMAGE=
@@ -1308,7 +1347,7 @@ if [ ! -f "$MIRROR_DIR/ai-svc/local-store/coreos-installer" ]; then
     -v $MIRROR_DIR/ai-svc/local-store:/data \
     -w /data \
     --entrypoint /bin/bash \
-    $LOCAL_REGISTRY/coreos/coreos-installer:v0.10.0 \
+    $LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/coreos/coreos-installer:v0.10.0 \
     -c 'cp /usr/sbin/coreos-installer /data/coreos-installer'
 fi
 
@@ -1329,7 +1368,7 @@ podman run -dt --pod $ISOLATED_AI_SVC_ENDPOINT --name $ISOLATED_AI_SVC_DB_HOSTNA
   -m 512m \
   --volume $MIRROR_DIR/ai-svc/volumes/db:/var/lib/pgsql:z \
   --authfile ${MIRROR_DIR}/auth/compiled-pull-secret.json \
-  $LOCAL_REGISTRY/ocpmetal/postgresql-12-centos7:latest
+  $LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/postgresql-12-centos7:latest
 
 sleep 3
 
@@ -1342,7 +1381,7 @@ podman run -dt --pod $ISOLATED_AI_SVC_ENDPOINT --name $ISOLATED_AI_SVC_IMAGE_HOS
   --restart unless-stopped \
   -m 1024m \
   --authfile ${MIRROR_DIR}/auth/compiled-pull-secret.json \
-  $LOCAL_REGISTRY/edge-infrastructure/assisted-image-service:latest
+  $LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/edge-infrastructure/assisted-image-service:stable
 
 # Deploy Assisted Service
 echo "Deploying Assisted Service..."
@@ -1351,6 +1390,7 @@ podman run -dt --pod $ISOLATED_AI_SVC_ENDPOINT --name $ISOLATED_AI_SVC_API_HOSTN
   -v $MIRROR_DIR/ai-svc/local-store/coreos-installer:/data/coreos-installer:z \
   -v ${MIRROR_DIR}/auth/mirror-pull-secret.json:/mirror-pull-secret.json:z \
   -v ${MIRROR_DIR}/auth/mirror-pull-secret-email-formatted.json:/mirror-pull-secret-email-formatted.json:z \
+  -v ${MIRROR_DIR}/auth/wrapped-mirror-pull-secret.json:/wrapped-mirror-pull-secret.json:z \
   -v ${MIRROR_DIR}/auth/compiled-pull-secret.json:/compiled-pull-secret.json:z \
   -v ${MIRROR_DIR}/auth/wrapped-compiled-pull-secret.json:/wrapped-compiled-pull-secret.json:z \
   -v $PULL_SECRET_PATH:/ocp-pull-secret.json:z \
@@ -1362,10 +1402,10 @@ podman run -dt --pod $ISOLATED_AI_SVC_ENDPOINT --name $ISOLATED_AI_SVC_API_HOSTN
   --entrypoint='["/bin/bash", "-c", "update-ca-trust; /assisted-service"]' \
   -m 1024m \
   --authfile ${MIRROR_DIR}/auth/compiled-pull-secret.json \
-  quay.io/ocpmetal/assisted-service:stable.21.09.2021-07.36
+  quay.io/ocpmetal/assisted-service:stable
 
 #  --entrypoint='["/bin/bash", "-c", "update-ca-trust; echo Waiting 30s for network init...; sleep 30; /assisted-service"]' \
-#$LOCAL_REGISTRY/ocpmetal/assisted-service:latest
+#$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-service:latest
 #  -v ${MIRROR_DIR}/auth/compiled-pull-secret.json:/root/.docker/config.json:z \
 #  -v ${MIRROR_DIR}/auth/compiled-pull-secret.json:/.docker/config.json:z \
 
@@ -1378,7 +1418,7 @@ podman run -dt --pod $ISOLATED_AI_SVC_ENDPOINT --name $ISOLATED_AI_SVC_WEB_UI_HO
   --restart unless-stopped \
   -m 512m \
   --authfile ${MIRROR_DIR}/auth/compiled-pull-secret.json \
-  $LOCAL_REGISTRY/ocpmetal/ocp-metal-ui:latest
+  $LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/ocp-metal-ui:stable
 
 EOF
 echo "  Assisted Installer service start script created!" 2>&1 | tee -a $LOG_FILE
