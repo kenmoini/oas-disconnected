@@ -154,7 +154,7 @@ function checkForProgramAndInstallOrExit() {
 ## Preflight
 
 ## Create some directories
-mkdir -p ${MIRROR_DIR}/{mirror-ingress/{haproxy,nginx/templates/,scripts}/,ai-svc/{local-store,volumes/{db,opt}}/,auth,dns,logs,pki,downloads/{images,olm,rhcos,tools}}
+mkdir -p ${MIRROR_DIR}/{mirror-ingress/{haproxy,nginx/templates/,scripts}/,ai-svc/{local-store,volumes/{db,opt,imgsvc}}/,auth,dns,logs,pki,downloads/{images,olm,rhcos,tools}}
 
 ## Save the set variables to a file
 export -p > ${MIRROR_DIR}/set_env
@@ -1376,6 +1376,7 @@ sleep 3
 echo "Deploying Assisted Image Service..."
 podman run -dt --pod $ISOLATED_AI_SVC_ENDPOINT --name $ISOLATED_AI_SVC_IMAGE_HOSTNAME \
   --env-file $MIRROR_DIR/ai-svc/volumes/opt/onprem-environment \
+  -v $MIRROR_DIR/ai-svc/volumes/imgsvc:/data:z \
   -v $MIRROR_DIR/downloads/ca.cert.pem:/etc/pki/ca-trust/source/anchors/ca.cert.pem:z \
   --entrypoint='["/bin/bash", "-c", "update-ca-trust; /assisted-image-service"]' \
   --restart unless-stopped \
@@ -1402,12 +1403,7 @@ podman run -dt --pod $ISOLATED_AI_SVC_ENDPOINT --name $ISOLATED_AI_SVC_API_HOSTN
   --entrypoint='["/bin/bash", "-c", "update-ca-trust; /assisted-service"]' \
   -m 1024m \
   --authfile ${MIRROR_DIR}/auth/compiled-pull-secret.json \
-  quay.io/ocpmetal/assisted-service:stable
-
-#  --entrypoint='["/bin/bash", "-c", "update-ca-trust; echo Waiting 30s for network init...; sleep 30; /assisted-service"]' \
-#$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-service:latest
-#  -v ${MIRROR_DIR}/auth/compiled-pull-secret.json:/root/.docker/config.json:z \
-#  -v ${MIRROR_DIR}/auth/compiled-pull-secret.json:/.docker/config.json:z \
+  $LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-service:latest
 
 sleep 3
 
@@ -1467,12 +1463,12 @@ set +e
 SVC_TEST=$(systemctl is-active --quiet mirror-ingress)
 if [ $? -eq 0 ]; then
   systemctl restart mirror-ingress &>> $LOG_FILE
-  echo "  Waiting 15s for the Mirror Ingress to restart..." 2>&1 | tee -a $LOG_FILE
-  sleep 15
+  echo "  Waiting 30s for the Mirror Ingress to restart..." 2>&1 | tee -a $LOG_FILE
+  sleep 30
 else
   systemctl enable --now mirror-ingress &>> $LOG_FILE
-  echo "  Waiting 15s for the Mirror Ingress to start..." 2>&1 | tee -a $LOG_FILE
-  sleep 15
+  echo "  Waiting 30s for the Mirror Ingress to start..." 2>&1 | tee -a $LOG_FILE
+  sleep 30
 fi
 set -e
 
