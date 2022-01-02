@@ -1,6 +1,7 @@
 #!/bin/bash
 
-set -e
+# Uncomment for debugging
+#set -e
 
 MIRROR_VM_HOSTNAME="mirror-vm"
 
@@ -9,7 +10,7 @@ UPDATE_SYSTEM="true"
 INSTALL_ANSIBLE="true"
 CONFIGURE_UNPRIVILEGED_PORT="true"
 EXTEND_ROOT_FS="true"
-REBOOT_AFTER_SETUP="true"
+REBOOT_AFTER_SETUP="false"
 
 ## If there is a NIC you want to create a bridge for set the following to true
 CONFIGURE_NETWORKING="true"
@@ -63,8 +64,10 @@ fi
 ## Extend the root partition
 if [ "$EXTEND_ROOT_FS" == "true" ]; then
   echo "===== Extending root logical volume and partition..." 2>&1 | tee -a $LOG_FILE
-  lvextend -l +100%FREE /dev/rhel/root &>> $LOG_FILE
-  xfs_growfs /dev/mapper/rhel-root &>> $LOG_FILE
+  ## Find the name of the root LV
+  ROOT_LV=$(lvs --noheadings -o lv_path | grep 'root' | sed -e 's/^[[:space:]]*//')
+  lvextend -l +100%FREE $ROOT_LV &>> $LOG_FILE
+  xfs_growfs $ROOT_LV &>> $LOG_FILE
 fi
 
 ## Create a bridge attached to the NIC in the isolated network to allow Containers/Pods to pull IPs from the Isolated network space
@@ -116,7 +119,8 @@ fi
 ## Optional: Install needed packages for Python3 and Ansible
 if [ "$INSTALL_ANSIBLE" == "true" ]; then
   echo "===== Installing Python3 and Ansible..." 2>&1 | tee -a $LOG_FILE
-  dnf install -y "@Development Tools" cmake expect cargo rust python3-devel python3-pip openssl-devel git &>> $LOG_FILE
+  dnf install -y "@Development Tools" cmake expect cargo rust python3-devel python3-pip python3-setuptools openssl-devel git &>> $LOG_FILE
+  python3 -m pip install --upgrade pip setuptools wheel &>> $LOG_FILE
   python3 -m pip install ansible paramiko &>> $LOG_FILE
 fi
 
