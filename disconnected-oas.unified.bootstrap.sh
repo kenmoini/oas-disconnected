@@ -28,7 +28,10 @@
 export MIRROR_DIR="/opt/offline-ai"
 
 ## Setting ONLY_MIRROR_DEFAULT_VERSION to true will limit the mirrored data to only the default version instead of all the versions serviced by the AI service
+## This saves tremendous disk space since each full release, and operator catalog can take anywhere from 400-500GB of disk space
 export ONLY_MIRROR_DEFAULT_VERSION="true"
+## Setting MIRROR_OPERATOR_CATALOG to false will not mirror the operator catalog, limiting the mirrored data to only the OpenShift release and AI Service
+export MIRROR_OPERATOR_CATALOG="true"
 
 # RH_API_OFFLINE_TOKEN_PATH is the token generated from this page: https://access.redhat.com/management/api
 export RH_API_OFFLINE_TOKEN_PATH="/opt/rh-api-offline-token"
@@ -45,18 +48,12 @@ export ISOLATED_NETWORK_END_RANGE="192.168.50.254"
 ## Service Network Information
 ## AI Pod
 export ISOLATED_AI_SVC_ENDPOINT="assisted-installer"
+export ISOLATED_AI_SVC_ENDPOINT_IP="192.168.50.11"
 
 export ISOLATED_AI_SVC_WEB_UI_HOSTNAME="ai-web-ui"
-export ISOLATED_AI_SVC_WEB_UI_IP="192.168.50.10"
-
 export ISOLATED_AI_SVC_API_HOSTNAME="ai-api"
-export ISOLATED_AI_SVC_API_IP="192.168.50.11"
-
 export ISOLATED_AI_SVC_DB_HOSTNAME="ai-db"
-export ISOLATED_AI_SVC_DB_IP="192.168.50.12"
-
 export ISOLATED_AI_SVC_IMAGE_HOSTNAME="ai-image"
-export ISOLATED_AI_SVC_IMAGE_IP="192.168.50.15"
 
 ## Ingress Pods
 export ISOLATED_AI_SVC_HAPROXY_IP="192.168.50.13"
@@ -81,12 +78,13 @@ export MIRROR_CONTAINER_REGISTRY_USER="openshift-release-dev+admin"
 export MIRROR_CONTAINER_REGISTRY_PASS="Passw0rd123"
 
 ## If moving to a different host in a different network then this can automatically set up the needed packages
-export PACKAGE_AND_COMPRESS_ASSETS="true"
+export PACKAGE_AND_COMPRESS_ASSETS="false"
 ## Can use either 7ZIP or TAR to compress the assets - TAR requires 3x the disk space where 7Zip only 2x.
 ## > Keep in mind each mirrored OpenShift release can require about 500GB of disk space
 ## P7ZIP package is provided by RPMs downloaded manually from EPEL - otherwise use tar
-export MIRROR_COMPRESS_ARCHIVER="7zip" # Can be 'tar' or '7zip'
-export MIRROR_COMPRESS_SPLIT_SIZE="1024" # MB
+export PACKAGE_AND_COMPRESS_ARCHIVER="7zip" # Can be 'tar' or '7zip'
+export PACKAGE_AND_COMPRESS_SPLIT_SIZE="1" # GB
+export PACKAGE_AND_COMPRESS_DESTINATION_PATH="${MIRROR_DIR}-bundle"
 
 ########################################################################################################################
 ## PKI Variables - Do not modify unless you know what you're doing
@@ -120,16 +118,15 @@ export ASSISTED_SERVICE_V1_API="${ASSISTED_SERVICE_ENDPOINT}${ASSISTED_SERVICE_V
 
 export LOCAL_REGISTRY="${MIRROR_VM_HOSTNAME}"
 export LOCAL_REPOSITORY="ocp4/openshift4"
-export PRODUCT_REPO="openshift-release-dev"
 export LOCAL_SECRET_JSON="${MIRROR_DIR}/auth/compiled-pull-secret.json"
-export RELEASE_NAME="ocp-release"
 export ARCHITECTURE="x86_64"
-
-export DETECTED_RHEL_RELEASE_VERSION=$(uname -r | sed 's/^.*\(el[0-9]\+\).*$/\1/')
 
 export P7ZIP_RPM_URL="https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/p/p7zip-16.02-20.el8.x86_64.rpm"
 export P7ZIP_DOC_RPM_URL="https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/p/p7zip-doc-16.02-20.el8.noarch.rpm"
 export P7ZIP_PLUGINS_RPM_URL="https://dl.fedoraproject.org/pub/epel/8/Everything/x86_64/Packages/p/p7zip-plugins-16.02-20.el8.x86_64.rpm"
+export P7ZIP_RPM_NAME=$(echo $P7ZIP_RPM_URL | rev | cut -d '/' -f 1 | rev)
+export P7ZIP_DOC_RPM_NAME=$(echo $P7ZIP_DOC_RPM_URL | rev | cut -d '/' -f 1 | rev)
+export P7ZIP_PLUGINS_RPM_NAME=$(echo $P7ZIP_PLUGINS_RPM_URL | rev | cut -d '/' -f 1 | rev)
 
 ########################################################################################################################
 ## Global Functions
@@ -177,15 +174,30 @@ else
   exit 1
 fi
 
+## Configure FirewallD
 if [ "$DISABLE_FIREWALLD" == "true" ]; then
   echo "  Disabling Firewalld..." 2>&1 | tee -a $LOG_FILE
   systemctl stop firewalld
   systemctl disable firewalld
+else
+  ## TODO: This still needs to be tested
+  echo "  Enabling Firewalld..." 2>&1 | tee -a $LOG_FILE
+  systemctl enable --now firewalld &>> $LOG_FILE
+  firewall-cmd --permanent --add-service=ssh &>> $LOG_FILE
+  firewall-cmd --permanent --add-service=http &>> $LOG_FILE
+  firewall-cmd --permanent --add-service=https &>> $LOG_FILE
+  firewall-cmd --permanent --add-service=cockpit &>> $LOG_FILE
+  firewall-cmd --reload &>> $LOG_FILE
 fi
 
+## Configure SELinux
 if [ "$DISABLE_SELINUX" == "true" ]; then
   echo "  Disabling SELinux..." 2>&1 | tee -a $LOG_FILE
   setenforce 0
+else
+  ## TODO: This still needs to be tested and additional contexts are likely needed
+  echo "  Enabling SELinux..." 2>&1 | tee -a $LOG_FILE
+  setenforce 1
 fi
 
 echo -e "  Checking for needed programs..." 2>&1 | tee -a $LOG_FILE
@@ -194,6 +206,35 @@ checkForProgramAndInstallOrExit curl curl 2>&1 | tee -a $LOG_FILE
 checkForProgramAndInstallOrExit podman podman 2>&1 | tee -a $LOG_FILE
 checkForProgramAndInstallOrExit openssl openssl 2>&1 | tee -a $LOG_FILE
 checkForProgramAndInstallOrExit htpasswd httpd-tools 2>&1 | tee -a $LOG_FILE
+
+########################################################################################################################
+## Archiver download if needed with P7Zip
+if [ "$PACKAGE_AND_COMPRESS_ASSETS" == "true" ]; then
+  mkdir -p $PACKAGE_AND_COMPRESS_DESTINATION_PATH
+  if [ "$PACKAGE_AND_COMPRESS_ARCHIVER" == "7zip" ]; then
+    echo "  Downloading P7Zip RPMs..." 2>&1 | tee -a $LOG_FILE
+
+    if [ ! -f "${MIRROR_DIR}/downloads/tools/$P7ZIP_RPM_NAME" ]; then
+      curl -sSL $P7ZIP_RPM_URL -o ${MIRROR_DIR}/downloads/tools/$P7ZIP_RPM_NAME
+    fi
+    if [ ! -f "${MIRROR_DIR}/downloads/tools/$P7ZIP_DOC_RPM_NAME" ]; then
+      curl -sSL $P7ZIP_DOC_RPM_URL -o ${MIRROR_DIR}/downloads/tools/$P7ZIP_DOC_RPM_NAME
+    fi
+    if [ ! -f "${MIRROR_DIR}/downloads/tools/$P7ZIP_PLUGINS_RPM_NAME" ]; then
+      curl -sSL $P7ZIP_PLUGINS_RPM_URL -o ${MIRROR_DIR}/downloads/tools/$P7ZIP_PLUGINS_RPM_NAME
+    fi
+
+    echo "  Installing P7Zip RPMs..." 2>&1 | tee -a $LOG_FILE
+    dnf localinstall -y ${MIRROR_DIR}/downloads/tools/$P7ZIP_DOC_RPM_NAME &>> $LOG_FILE
+    dnf localinstall -y ${MIRROR_DIR}/downloads/tools/$P7ZIP_RPM_NAME &>> $LOG_FILE
+    dnf localinstall -y ${MIRROR_DIR}/downloads/tools/$P7ZIP_PLUGINS_RPM_NAME &>> $LOG_FILE
+  fi
+
+  if [ "$PACKAGE_AND_COMPRESS_ARCHIVER" == "tar" ]; then
+    echo "  Installing TAR..." 2>&1 | tee -a $LOG_FILE
+    dnf install -y tar &>> $LOG_FILE
+  fi
+fi
 
 ########################################################################################################################
 ## RH API Authentication
@@ -233,16 +274,16 @@ echo -e "\n===== Preflight passed!\n" 2>&1 | tee -a $LOG_FILE
 echo -e "===== Setting up /etc/hosts..." 2>&1 | tee -a $LOG_FILE
 
 if [ -n "$(grep $MIRROR_VM_HOSTNAME /etc/hosts)" ]; then
-  echo "  $MIRROR_VM_HOSTNAME already exists : $(grep $MIRROR_VM_HOSTNAME /etc/hosts)"
+  echo "  $MIRROR_VM_HOSTNAME already exists : $(grep $MIRROR_VM_HOSTNAME /etc/hosts)" 2>&1 | tee -a $LOG_FILE
 else
-  echo "  Adding $MIRROR_VM_HOSTNAME to your /etc/hosts file...";
+  echo "  Adding $MIRROR_VM_HOSTNAME to your /etc/hosts file..." 2>&1 | tee -a $LOG_FILE
   printf "%s\t%s\n" "127.0.0.1" "$MIRROR_VM_HOSTNAME" | tee -a /etc/hosts > /dev/null
 
   ## Discount double-check
   if [ -n "$(grep $MIRROR_VM_HOSTNAME /etc/hosts)" ]; then
-      echo "  $MIRROR_VM_HOSTNAME was added succesfully!";
+      echo "  $MIRROR_VM_HOSTNAME was added succesfully!" 2>&1 | tee -a $LOG_FILE
   else
-      echo "  Failed to add $MIRROR_VM_HOSTNAME to /etc/hosts";
+      echo "  Failed to add $MIRROR_VM_HOSTNAME to /etc/hosts" 2>&1 | tee -a $LOG_FILE
       exit 1
   fi
 fi
@@ -413,7 +454,10 @@ echo "  Credentials & PKI Created!" 2>&1 | tee -a $LOG_FILE
 echo -e "\n===== Creating Podman Bridged Network..." 2>&1 | tee -a $LOG_FILE
 mkdir -p /etc/cni/net.d/
 
-CUR_PODMAN_NET_SUM=$(md5sum /etc/cni/net.d/$MIRROR_VM_ISOLATED_BRIDGE_IFACE.conflist)
+CUR_PODMAN_NET_SUM=""
+if [ -f "/etc/cni/net.d/$MIRROR_VM_ISOLATED_BRIDGE_IFACE.conflist" ]; then
+  CUR_PODMAN_NET_SUM=$(md5sum /etc/cni/net.d/$MIRROR_VM_ISOLATED_BRIDGE_IFACE.conflist)
+fi
 cat > /etc/cni/net.d/$MIRROR_VM_ISOLATED_BRIDGE_IFACE.conflist <<EOF
 {
   "cniVersion": "0.4.0",
@@ -474,7 +518,10 @@ echo -e "\n===== Deploying GoZones DNS..." 2>&1 | tee -a $LOG_FILE
 ## Create some extra directories
 mkdir -p ${MIRROR_DIR}/dns/volumes/{go-zones,bind}
 
-CUR_SUM_DNS_SVC=$(md5sum /etc/systemd/system/dns-go-zones.service)
+CUR_SUM_DNS_SVC=""
+if [ -f "/etc/systemd/system/dns-go-zones.service" ]; then
+  CUR_SUM_DNS_SVC=$(md5sum /etc/systemd/system/dns-go-zones.service)
+fi
 cat > /etc/systemd/system/dns-go-zones.service <<EOF
 [Unit]
 Description=DNS by GoZones (dns-go-zones)
@@ -535,7 +582,10 @@ zones:
 EOF
 NEW_SUM_DNS_DEF=$(md5sum $MIRROR_DIR/dns/volumes/go-zones/zones.yml)
 
-CUR_SUM_DNS_FORWARDERS=$(md5sum $MIRROR_DIR/dns/volumes/bind/external_forwarders.conf)
+CUR_SUM_DNS_FORWARDERS=""
+if [ -f "$MIRROR_DIR/dns/volumes/bind/external_forwarders.conf" ]; then
+  CUR_SUM_DNS_FORWARDERS=$(md5sum $MIRROR_DIR/dns/volumes/bind/external_forwarders.conf)
+fi
 cat > $MIRROR_DIR/dns/volumes/bind/external_forwarders.conf <<EOF
 forwarders {
   127.0.0.53;
@@ -543,7 +593,10 @@ forwarders {
 EOF
 NEW_SUM_DNS_FORWARDERS=$(md5sum $MIRROR_DIR/dns/volumes/bind/external_forwarders.conf)
 
-CUR_SUM_DNS_CONFIG=$(md5sum $MIRROR_DIR/dns/volumes/bind/named.conf)
+CUR_SUM_DNS_CONFIG=""
+if [ -f "$MIRROR_DIR/dns/volumes/bind/named.conf" ]; then
+  CUR_SUM_DNS_CONFIG=$(md5sum $MIRROR_DIR/dns/volumes/bind/named.conf)
+fi
 cat > $MIRROR_DIR/dns/volumes/bind/named.conf <<EOF
 options {
   listen-on port 53 { any; };
@@ -639,7 +692,11 @@ echo -e "\n===== Deploying Docker Registry..." 2>&1 | tee -a $LOG_FILE
 
 ## Create the Docker Registry Service
 echo "  Creating the Docker Registry service..." 2>&1 | tee -a $LOG_FILE
-CUR_SUM_REG_SVC=$(md5sum /etc/systemd/system/mirror-registry.service)
+
+CUR_SUM_REG_SVC=""
+if [ -f "/etc/systemd/system/mirror-registry.service" ]; then
+  CUR_SUM_REG_SVC=$(md5sum /etc/systemd/system/mirror-registry.service)
+fi
 cat > /etc/systemd/system/mirror-registry.service <<EOF
 [Unit]
 Description=Mirror registry (mirror-registry)
@@ -815,24 +872,6 @@ for version in $(cat ${MIRROR_DIR}/ai-svc/cluster-versions.json | jq -r '.[] | @
     echo "  - Downloading RH CoreOS RootFS..." 2>&1 | tee -a $LOG_FILE
     curl -sSL https://mirror.openshift.com/pub/openshift-v4/dependencies/rhcos/${VERSION_SHORT}/latest/rhcos-live-rootfs.x86_64.img -o ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/rhcos-live-rootfs.x86_64.img
   fi
-
-
-  ## Mirror needed OCP images
-  ## https://docs.openshift.com/container-platform/4.9/installing/installing-mirroring-installation-images.html#installation-mirror-repository_installing-mirroring-installation-images
-  echo "  - Downloading OpenShift Release Images..." 2>&1 | tee -a $LOG_FILE
-  OCP_RELEASE="$VERSION_FULL"
-
-  ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/oc adm -a ${LOCAL_SECRET_JSON} release mirror \
-    --from=quay.io/${PRODUCT_REPO}/${RELEASE_NAME}:${OCP_RELEASE}-${ARCHITECTURE} \
-    --to=${LOCAL_REGISTRY}/${LOCAL_REPOSITORY} \
-    --to-release-image=${LOCAL_REGISTRY}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE} &>> $LOG_FILE
-
-  ## Extract the openshift-install binary
-  echo -e "  - Extracting the openshift-install binary..." 2>&1 | tee -a $LOG_FILE
-  cd ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/ &>> $LOG_FILE
-  ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/oc adm release extract -a ${LOCAL_SECRET_JSON} --command=openshift-install "${LOCAL_REGISTRY}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE}" &>> $LOG_FILE
-  ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/openshift-install version &>> $LOG_FILE
-  cd - &>> $LOG_FILE
   
   echo "  - Mapping OpenShift and RHCOS Images..." 2>&1 | tee -a $LOG_FILE
   ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/oc adm release info ${VERSION_FULL} -o 'jsonpath={.displayVersions.machine-os.Version}' > ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/version
@@ -843,14 +882,14 @@ for version in $(cat ${MIRROR_DIR}/ai-svc/cluster-versions.json | jq -r '.[] | @
 
   ## Generate JSON for OS_IMAGES env var needed by OAS
   cat > ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/rhcos-image-info.json <<EOF
-{"openshift_version":"$VERSION_SHORT","cpu_architecture":"$RHCOS_ARCHITECTURE","url":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live.$RHCOS_ARCHITECTURE.iso","rootfs_url":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live-rootfs.$RHCOS_ARCHITECTURE.img","version":"$(cat ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/version)"}
+{"openshift_version":"$VERSION_SHORT","cpu_architecture":"${RHCOS_ARCHITECTURE}","url":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live.$RHCOS_ARCHITECTURE.iso","rootfs_url":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live-rootfs.$RHCOS_ARCHITECTURE.img","version":"$(cat ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/version)"}
 EOF
   cat > ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/release-image-info.json <<EOF
-{"openshift_version":"$VERSION_SHORT","cpu_architecture":"$RHCOS_ARCHITECTURE","url":"${LOCAL_REGISTRY}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE}","version":"$VERSION_FULL"}
+{"openshift_version":"$VERSION_SHORT","cpu_architecture":"${RHCOS_ARCHITECTURE}","url":"${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE}","version":"$VERSION_FULL"}
 EOF
 oc_version() {
   cat <<EOF
-"$VERSION_SHORT":{"display_name":"$VERSION_FULL","release_version":"$VERSION_FULL","release_image":"${LOCAL_REGISTRY}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE}","rhcos_image":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live.$RHCOS_ARCHITECTURE.iso","rhcos_rootfs":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live-rootfs.$RHCOS_ARCHITECTURE.img","rhcos_version":"$(cat ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/version)","support_level":"production"},
+"$VERSION_SHORT":{"display_name":"${VERSION_FULL}","release_version":"${VERSION_FULL}","release_image":"${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE}","rhcos_image":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live.$RHCOS_ARCHITECTURE.iso","rhcos_rootfs":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live-rootfs.$RHCOS_ARCHITECTURE.img","rhcos_version":"$(cat ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/version)","support_level":"production"},
 EOF
 }
   COMPILED_OPENSHIFT_VERSIONS+=$(oc_version)
@@ -860,37 +899,59 @@ EOF
   mv ${MIRROR_DIR}/downloads/rhcos/os_images.json.tmp ${MIRROR_DIR}/downloads/rhcos/os_images.json
   mv ${MIRROR_DIR}/downloads/rhcos/release_images.json.tmp ${MIRROR_DIR}/downloads/rhcos/release_images.json
 
+  ## Mirror needed OCP images
+  ## https://docs.openshift.com/container-platform/4.9/installing/installing-mirroring-installation-images.html#installation-mirror-repository_installing-mirroring-installation-images
+  echo "  - Downloading OpenShift Release Images..." 2>&1 | tee -a $LOG_FILE
+  OCP_RELEASE="$VERSION_FULL"
+
+  ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/oc adm -a ${LOCAL_SECRET_JSON} release mirror \
+    --from=quay.io/openshift-release-dev/ocp-release:${OCP_RELEASE}-${ARCHITECTURE} \
+    --to=${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY} \
+    --to-release-image=${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE} &>> $LOG_FILE
+
+  ## Extract the openshift-install binary
+  echo -e "  - Extracting the openshift-install binary..." 2>&1 | tee -a $LOG_FILE
+  cd ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/ &>> $LOG_FILE
+  ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/oc adm release extract -a ${LOCAL_SECRET_JSON} --command=openshift-install "${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE}" &>> $LOG_FILE
+  ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/openshift-install version &>> $LOG_FILE
+  cd - &>> $LOG_FILE
+
   echo "  - All assets for ${VERSION_FULL} downloaded!" 2>&1 | tee -a $LOG_FILE
 
-  if [ ! -f "$MIRROR_DIR/downloads/olm/.finished" ]; then
-    echo "===== Mirroring Operator catalog..." 2>&1 | tee -a $LOG_FILE
-    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc adm catalog mirror registry.redhat.io/redhat/redhat-operator-index:v${VERSION_SHORT} $LOCAL_REGISTRY/olm-mirror -a ${LOCAL_SECRET_JSON} --to-manifests="$MIRROR_DIR/downloads/olm" 2>&1 | tee -a $LOG_FILE
-    touch $MIRROR_DIR/downloads/olm/.finished
+  if [ "$MIRROR_OPERATOR_CATALOG" == "true" ]; then
+    if [ ! -f "$MIRROR_DIR/downloads/rhcos/${VERSION_FULL}/.operator-catalog-finished" ]; then
+      echo "===== Mirroring Operator catalog..." 2>&1 | tee -a $LOG_FILE
+      ${MIRROR_DIR}/downloads/tools/${VERSION_FULL}/oc adm catalog mirror registry.redhat.io/redhat/redhat-operator-index:v${VERSION_SHORT} ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/olm-mirror -a ${LOCAL_SECRET_JSON} --to-manifests="${MIRROR_DIR}/downloads/olm" 2>&1 | tee -a $LOG_FILE
+      touch $MIRROR_DIR/downloads/rhcos/${VERSION_FULL}/.operator-catalog-finished
+    fi
   fi
 
 done
 COMPILED_OPENSHIFT_VERSIONS_COMMA_FIX="${COMPILED_OPENSHIFT_VERSIONS::-1}}"
 echo $COMPILED_OPENSHIFT_VERSIONS_COMMA_FIX > ${MIRROR_DIR}/ai-svc/openshift_versions.json
 
+## Save the snippet of the generated imageContentSources spec for install-config.yaml files
+grep -A6 'imageContentSources:' $LOG_FILE | head -n7 > ${MIRROR_DIR}/image_content_sources.yaml
+
 ########################################################################################################################
 ## Download the AI service components
 echo -e "\n===== Mirroring the Assisted Installer Service..." 2>&1 | tee -a $LOG_FILE
 
 ### Mirror coreos-installer
-#if [ ! -d "${MIRROR_DIR}/downloads/images/docker/registry/v2/repositories/coreos/coreos-installer" ]; then
+if [ ! -d "${MIRROR_DIR}/downloads/images/docker/registry/v2/repositories/coreos/coreos-installer" ]; then
   IMAGE="coreos-installer"
-  ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/coreos/$IMAGE:v0.9.1 $LOCAL_REGISTRY/coreos/$IMAGE:v0.9.1 &>> $LOG_FILE
-  ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/coreos/$IMAGE:v0.10.0 $LOCAL_REGISTRY/coreos/$IMAGE:v0.10.0 &>> $LOG_FILE
-  ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/coreos/$IMAGE:release $LOCAL_REGISTRY/coreos/$IMAGE:release &>> $LOG_FILE
-#fi
+  ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/coreos/$IMAGE:v0.9.1 ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/coreos/$IMAGE:v0.9.1 &>> $LOG_FILE
+  ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/coreos/$IMAGE:v0.10.0 ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/coreos/$IMAGE:v0.10.0 &>> $LOG_FILE
+  ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/coreos/$IMAGE:release ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/coreos/$IMAGE:release &>> $LOG_FILE
+fi
 echo "  coreos-installer images mirrored!" 2>&1 | tee -a $LOG_FILE
 
 ### Mirror Library components
 if [ ! -d "${MIRROR_DIR}/downloads/images/docker/registry/v2/repositories/library/nginx/_manifests/tags/latest" ]; then
   for IMAGE in haproxy nginx
   do
-    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror docker.io/library/$IMAGE:latest $LOCAL_REGISTRY/library/$IMAGE:latest &>> $LOG_FILE
-    echo "  - Mirrored to $LOCAL_REGISTRY/library/$IMAGE:latest" 2>&1 | tee -a $LOG_FILE
+    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror docker.io/library/$IMAGE:latest ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/library/$IMAGE:latest &>> $LOG_FILE
+    echo "  - Mirrored to ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/library/$IMAGE:latest" 2>&1 | tee -a $LOG_FILE
   done
 fi
 echo "  Library images mirrored!" 2>&1 | tee -a $LOG_FILE
@@ -899,15 +960,15 @@ echo "  Library images mirrored!" 2>&1 | tee -a $LOG_FILE
 if [ ! -d "${MIRROR_DIR}/downloads/images/docker/registry/v2/repositories/ocpmetal/assisted-service/_manifests/tags/latest" ]; then
   for IMAGE in postgresql-12-centos7 ocp-metal-ui agent assisted-installer-agent assisted-iso-create assisted-installer assisted-installer-controller assisted-service
   do
-    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/ocpmetal/$IMAGE:latest $LOCAL_REGISTRY/ocpmetal/$IMAGE:latest &>> $LOG_FILE
-    echo "  - Mirrored to $LOCAL_REGISTRY/ocpmetal/$IMAGE:latest" 2>&1 | tee -a $LOG_FILE
+    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/ocpmetal/$IMAGE:latest ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/ocpmetal/$IMAGE:latest &>> $LOG_FILE
+    echo "  - Mirrored to ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/ocpmetal/$IMAGE:latest" 2>&1 | tee -a $LOG_FILE
   done
 fi
 if [ ! -d "${MIRROR_DIR}/downloads/images/docker/registry/v2/repositories/edge-infrastructure/assisted-installer-ui/_manifests/tags/latest" ]; then
   for IMAGE in assisted-installer-agent assisted-installer assisted-installer-controller assisted-service assisted-image-service assisted-installer-ui
   do
-    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/edge-infrastructure/$IMAGE:latest $LOCAL_REGISTRY/edge-infrastructure/$IMAGE:latest &>> $LOG_FILE
-    echo "  - Mirrored to $LOCAL_REGISTRY/edge-infrastructure/$IMAGE:latest" 2>&1 | tee -a $LOG_FILE
+    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/edge-infrastructure/$IMAGE:latest ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/edge-infrastructure/$IMAGE:latest &>> $LOG_FILE
+    echo "  - Mirrored to ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/edge-infrastructure/$IMAGE:latest" 2>&1 | tee -a $LOG_FILE
   done
 fi
 echo "  Latest Assisted Service images mirrored!" 2>&1 | tee -a $LOG_FILE
@@ -915,15 +976,15 @@ echo "  Latest Assisted Service images mirrored!" 2>&1 | tee -a $LOG_FILE
 if [ ! -d "${MIRROR_DIR}/downloads/images/docker/registry/v2/repositories/ocpmetal/assisted-service/_manifests/tags/stable" ]; then
   for IMAGE in ocp-metal-ui assisted-iso-create assisted-installer assisted-installer-controller assisted-service
   do
-    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/ocpmetal/$IMAGE:stable $LOCAL_REGISTRY/ocpmetal/$IMAGE:stable &>> $LOG_FILE
-    echo "  - Mirrored to $LOCAL_REGISTRY/ocpmetal/$IMAGE:stable" 2>&1 | tee -a $LOG_FILE
+    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/ocpmetal/$IMAGE:stable ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/ocpmetal/$IMAGE:stable &>> $LOG_FILE
+    echo "  - Mirrored to ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/ocpmetal/$IMAGE:stable" 2>&1 | tee -a $LOG_FILE
   done
 fi
 if [ ! -d "${MIRROR_DIR}/downloads/images/docker/registry/v2/repositories/edge-infrastructure/assisted-installer-ui/_manifests/tags/stable" ]; then
   for IMAGE in assisted-installer-agent assisted-installer assisted-installer-controller assisted-service assisted-image-service assisted-installer-ui
   do
-    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/edge-infrastructure/$IMAGE:stable $LOCAL_REGISTRY/edge-infrastructure/$IMAGE:stable &>> $LOG_FILE
-    echo "  - Mirrored to $LOCAL_REGISTRY/edge-infrastructure/$IMAGE:stable" 2>&1 | tee -a $LOG_FILE
+    ${MIRROR_DIR}/downloads/tools/${LATEST_VERSION_FULL}/oc -a ${LOCAL_SECRET_JSON} image mirror quay.io/edge-infrastructure/$IMAGE:stable ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/edge-infrastructure/$IMAGE:stable &>> $LOG_FILE
+    echo "  - Mirrored to ${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/edge-infrastructure/$IMAGE:stable" 2>&1 | tee -a $LOG_FILE
   done
 fi
 echo "  Stable Assisted Service images mirrored!" 2>&1 | tee -a $LOG_FILE
@@ -931,10 +992,10 @@ echo "  Stable Assisted Service images mirrored!" 2>&1 | tee -a $LOG_FILE
 ########################################################################################################################
 ## Bake the configuration files needed for the Assisted Installer Service
 echo -e "\n===== Generating Assisted Service configuration files..." 2>&1 | tee -a $LOG_FILE
-CONTROLLER_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer-controller:latest | jq -r '.Digest')
-AGENT_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer-agent:latest | jq -r '.Digest')
-INSTALLER_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer:latest | jq -r '.Digest')
-INSTALL_RELEASE_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocp4/openshift4:${LATEST_VERSION_FULL}-x86_64 | jq -r '.Digest')
+CONTROLLER_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/ocpmetal/assisted-installer-controller:latest | jq -r '.Digest')
+AGENT_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/ocpmetal/assisted-installer-agent:latest | jq -r '.Digest')
+INSTALLER_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/ocpmetal/assisted-installer:latest | jq -r '.Digest')
+INSTALL_RELEASE_DIGEST=$(skopeo inspect --authfile ${LOCAL_SECRET_JSON} docker://${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/ocp4/openshift4:${LATEST_VERSION_FULL}-x86_64 | jq -r '.Digest')
 echo "  Using Digests:" 2>&1 | tee -a $LOG_FILE
 echo "  - assisted-installer: $INSTALLER_DIGEST" 2>&1 | tee -a $LOG_FILE
 echo "  - assisted-installer-agent: $AGENT_DIGEST" 2>&1 | tee -a $LOG_FILE
@@ -1101,13 +1162,13 @@ backend registry
 
 backend aiapi
   mode http
-  server aiapi1 $ISOLATED_AI_SVC_API_IP:8090
+  server aiapi1 $ISOLATED_AI_SVC_ENDPOINT_IP:8090
   http-request add-header X-Forwarded-Proto https if { ssl_fc }
   http-response set-header Strict-Transport-Security "max-age=16000000; includeSubDomains; preload;"
 
 backend aiwebui
   mode http
-  server aiwebui1 $ISOLATED_AI_SVC_API_IP:8080
+  server aiwebui1 $ISOLATED_AI_SVC_ENDPOINT_IP:8080
   http-request add-header X-Forwarded-Proto https if { ssl_fc }
   http-response set-header Strict-Transport-Security "max-age=16000000; includeSubDomains; preload;"
 EOF
@@ -1164,9 +1225,6 @@ echo "  Assisted Installer SystemD service script created!" 2>&1 | tee -a $LOG_F
 ###########################################
 ## Create Assisted Installer Configuration
 cat > $MIRROR_DIR/ai-svc/volumes/opt/onprem-environment <<EOF
-########################################################################
-# file: /opt/assisted-service/onprem-environment
-########################################################################
 #This is the IP or name with the API the OCP discovery agent will callback
 SERVICE_FQDN="assisted-installer.${ISOLATED_NETWORK_DOMAIN}"
 #SERVICE_BASE_URL=https://assisted-installer.${ISOLATED_NETWORK_DOMAIN}
@@ -1217,7 +1275,7 @@ RELEASE_IMAGES=$(cat ${MIRROR_DIR}/downloads/rhcos/release_images.json)
 #CONTROLLER_IMAGE="$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN/ocpmetal/assisted-installer-controller:@${CONTROLLER_DIGEST}"
 
 # Uncomment to avoid pull-secret requirement for quay.io on restricted network installs
-PUBLIC_CONTAINER_REGISTRIES="quay.io,registry.access.redhat.com,registry.redhat.io,mirror-vm"
+PUBLIC_CONTAINER_REGISTRIES="quay.io,registry.access.redhat.com,registry.redhat.io,$LOCAL_REGISTRY.$ISOLATED_NETWORK_DOMAIN"
 
 # Format has changed for HW validation (Link: https://github.com/openshift/assisted-service/blob/master/onprem-environment#L19)
 HW_VALIDATOR_REQUIREMENTS=[{"version":"default","master":{"cpu_cores":4,"ram_mib":16384,"disk_size_gb":120,"installation_disk_speed_threshold_ms":10,"network_latency_threshold_ms":100,"packet_loss_percentage":0},"worker":{"cpu_cores":2,"ram_mib":8192,"disk_size_gb":120,"installation_disk_speed_threshold_ms":10,"network_latency_threshold_ms":1000,"packet_loss_percentage":10},"sno":{"cpu_cores":8,"ram_mib":32768,"disk_size_gb":120,"installation_disk_speed_threshold_ms":10}}]
@@ -1286,9 +1344,6 @@ fi
 ###########################################
 ## Create Nginx configuration for the Assisted Installer UI
 cat > $MIRROR_DIR/ai-svc/volumes/opt/nginx-ui.conf <<EOF
-########################################################################
-# file: /opt/assisted-service/nginx-ui.conf 
-########################################################################
 server {
   listen 0.0.0.0:8080;
   server_name _;
@@ -1321,15 +1376,7 @@ $MIRROR_DIR/ai-svc/service_stop.sh
 sleep 3
 
 echo "Checking for stale network lock file..."
-FILE_CHECK="/var/lib/cni/networks/${MIRROR_VM_ISOLATED_BRIDGE_IFACE}/${ISOLATED_AI_SVC_DB_IP}"
-if [ -f "\$FILE_CHECK" ]; then
-    rm \$FILE_CHECK
-fi
-FILE_CHECK="/var/lib/cni/networks/${MIRROR_VM_ISOLATED_BRIDGE_IFACE}/${ISOLATED_AI_SVC_API_IP}"
-if [ -f "\$FILE_CHECK" ]; then
-    rm \$FILE_CHECK
-fi
-FILE_CHECK="/var/lib/cni/networks/${MIRROR_VM_ISOLATED_BRIDGE_IFACE}/${ISOLATED_AI_SVC_WEB_UI_IP}"
+FILE_CHECK="/var/lib/cni/networks/${MIRROR_VM_ISOLATED_BRIDGE_IFACE}/${ISOLATED_AI_SVC_ENDPOINT_IP}"
 if [ -f "\$FILE_CHECK" ]; then
     rm \$FILE_CHECK
 fi
@@ -1359,7 +1406,7 @@ chown -R 26 $MIRROR_DIR/ai-svc/volumes/db
 # Create containers
 
 # Create Pod
-podman pod create --name $ISOLATED_AI_SVC_ENDPOINT -p 5432:5432,8080:8080,8090:8090 --network "${MIRROR_VM_ISOLATED_BRIDGE_IFACE}" --ip "${ISOLATED_AI_SVC_API_IP}" --dns "${MIRROR_VM_ISOLATED_BRIDGE_IFACE_IP}" --dns-search "${ISOLATED_NETWORK_DOMAIN}"
+podman pod create --name $ISOLATED_AI_SVC_ENDPOINT -p 5432:5432,8080:8080,8090:8090 --network "${MIRROR_VM_ISOLATED_BRIDGE_IFACE}" --ip "${ISOLATED_AI_SVC_ENDPOINT_IP}" --dns "${MIRROR_VM_ISOLATED_BRIDGE_IFACE_IP}" --dns-search "${ISOLATED_NETWORK_DOMAIN}"
 
 # Deploy database
 echo "Deploying Database..."
@@ -1459,9 +1506,8 @@ echo "  Reloading services..." 2>&1 | tee -a $LOG_FILE
 systemctl daemon-reload
 
 echo "  Starting Mirror Ingress..." 2>&1 | tee -a $LOG_FILE
-set +e
-SVC_TEST=$(systemctl is-active --quiet mirror-ingress)
-if [ $? -eq 0 ]; then
+MIRROR_SVC_TEST=$(systemctl is-active mirror-ingress)
+if [ "$MIRROR_SVC_TEST" == "active" ]; then
   systemctl restart mirror-ingress &>> $LOG_FILE
   echo "  Waiting 30s for the Mirror Ingress to restart..." 2>&1 | tee -a $LOG_FILE
   sleep 30
@@ -1470,12 +1516,10 @@ else
   echo "  Waiting 30s for the Mirror Ingress to start..." 2>&1 | tee -a $LOG_FILE
   sleep 30
 fi
-set -e
 
 echo "  Starting Assisted Installer..." 2>&1 | tee -a $LOG_FILE
-set +e
-SVC_TEST=$(systemctl is-active --quiet assisted-installer)
-if [ $? -eq 0 ]; then
+AI_SVC_TEST=$(systemctl is-active assisted-installer)
+if [ "$AI_SVC_TEST" == "active" ]; then
   systemctl restart assisted-installer &>> $LOG_FILE
   #echo "  Waiting 15s for the Assisted Installer to restart..." 2>&1 | tee -a $LOG_FILE
   #sleep 15
@@ -1486,16 +1530,71 @@ else
 fi
 set -e
 
-
-## Package the services in an archive
-
-## Clone down Libvirt automation and run it
-## Create CA for OpenShift [Optional]
-
-## FirewallD better stuff
-## Get Zone for an interface: firewall-cmd --get-active-zones | grep -B1 'enp1s0' | head -n 1
+########################################################################################################################
+## Create an example install-config.yaml
+echo -e "\n===== Creating an example install-config.yaml..." 2>&1 | tee -a $LOG_FILE
+cat > $MIRROR_DIR/example-install-config.yaml <<EOF
+apiVersion: v1
+baseDomain: example.com
+controlPlane:
+  name: master
+  hyperthreading: Disabled 
+  replicas: 3
+compute:
+- name: worker
+  hyperthreading: Disabled
+  replicas: 3
+metadata:
+  name: test-cluster
+networking:
+  networkType: OpenShiftSDN
+  clusterNetworks:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  machineNetwork:
+  - cidr: 172.18.0.0/16
+  serviceNetwork:
+  - 172.30.0.0/16
+platform:
+  none: {}
+fips: false
+sshKey: 'ssh-rsa kjhf9dfkjf...'
+pullSecret: '$(jq -rcM $MIRROR_DIR/auth/mirror-pull-secret-email-formatted.json)'
+additionalTrustBundle: |
+  $($MIRROR_DIR/pki/ca.cert.pem | sed 's/^/  /')
+$(cat ${MIRROR_DIR}/image_content_sources.yaml)
+EOF
 
 ## Save the set variables to a file at the end to pick up any changes and dynamically created/updated variables
 export -p > ${MIRROR_DIR}/set_env.finished
+
+## Package the assets in an archive
+if [ "$PACKAGE_AND_COMPRESS_ASSETS" == "true" ]; then
+  echo -e "\n===== Packaging of assets enabled - stopping services..." 2>&1 | tee -a $LOG_FILE
+  systemctl stop mirror-ingress &>> $LOG_FILE
+  systemctl stop assisted-installer &>> $LOG_FILE
+  systemctl stop mirror-registry &>> $LOG_FILE
+  systemctl stop dns-go-zones &>> $LOG_FILE
+
+  ## Package into split 7zip files
+  if [ "$PACKAGE_AND_COMPRESS_ARCHIVER" == "7zip" ]; then
+    echo -e "  Packaging assets with 7Zip..." 2>&1 | tee -a $LOG_FILE
+    7za a -t7z -v${PACKAGE_AND_COMPRESS_SPLIT_SIZE}g -m0=lzma -mx=9 -mfb=64 -md=32m -ms=on ${PACKAGE_AND_COMPRESS_DESTINATION_PATH}/offline-openshift-bundle.7z ${MIRROR_DIR}
+    echo -e "  7Zip archive files packaged at ${PACKAGE_AND_COMPRESS_DESTINATION_PATH}" 2>&1 | tee -a $LOG_FILE
+  fi
+
+  ## Package as a tar file, then split and remove the old tar file
+  if [ "$PACKAGE_AND_COMPRESS_ARCHIVER" == "tar" ]; then
+    echo -e "  Packaging assets with tar..." 2>&1 | tee -a $LOG_FILE
+    tar -cvzf ${PACKAGE_AND_COMPRESS_DESTINATION_PATH}/offline-openshift-bundle.tar.gz ${MIRROR_DIR}
+    split -b ${PACKAGE_AND_COMPRESS_SPLIT_SIZE}G ${PACKAGE_AND_COMPRESS_DESTINATION_PATH}/offline-openshift-bundle.tar.gz "${PACKAGE_AND_COMPRESS_DESTINATION_PATH}/offline-openshift-bundle.tar.gz.part" && rm ${PACKAGE_AND_COMPRESS_DESTINATION_PATH}/offline-openshift-bundle.tar.gz
+    echo -e "  Tar archive files packaged at ${PACKAGE_AND_COMPRESS_DESTINATION_PATH}" 2>&1 | tee -a $LOG_FILE
+  fi
+
+  ## Generate a checksum file for integrity checking
+  echo -e "  Generating md5sum map..." 2>&1 | tee -a $LOG_FILE
+  md5sum ${PACKAGE_AND_COMPRESS_DESTINATION_PATH}/* > ${MIRROR_DIR}/offline-openshift-bundle.md5 &>> $LOG_FILE
+  mv ${MIRROR_DIR}/offline-openshift-bundle.md5 ${PACKAGE_AND_COMPRESS_DESTINATION_PATH}/offline-openshift-bundle.md5
+fi
 
 echo -e "\n===== Execution complete! =====\n" 2>&1 | tee -a $LOG_FILE
