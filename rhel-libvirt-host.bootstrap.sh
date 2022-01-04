@@ -105,7 +105,7 @@ function checkForProgramAndInstallOrExit() {
 
 mkdir -p $(dirname $LOG_FILE)
 
-echo "\n===== Running Preflight..." 2>&1 | tee -a $LOG_FILE
+echo -e "\n===== Running Preflight..." 2>&1 | tee -a $LOG_FILE
 
 ## Create a working directory
 echo "  Creating working directory..." 2>&1 | tee -a $LOG_FILE
