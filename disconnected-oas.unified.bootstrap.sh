@@ -1556,9 +1556,9 @@ platform:
   none: {}
 fips: false
 sshKey: 'ssh-rsa kjhf9dfkjf...'
-pullSecret: '$(jq -rcM $MIRROR_DIR/auth/mirror-pull-secret-email-formatted.json)'
+pullSecret: '$(jq -rcM '.' $MIRROR_DIR/auth/mirror-pull-secret-email-formatted.json)'
 additionalTrustBundle: |
-  $($MIRROR_DIR/pki/ca.cert.pem | sed 's/^/  /')
+  $(cat $MIRROR_DIR/pki/ca.cert.pem | sed 's/^/  /')
 $(cat ${MIRROR_DIR}/image_content_sources.yaml)
 EOF
 
