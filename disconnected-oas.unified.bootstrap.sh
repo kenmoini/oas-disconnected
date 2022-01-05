@@ -17,8 +17,9 @@
 ## Prerequisites:
 ##
 ## - The host must be running RHEL 8.4+ and already subscribed to RHSM/Satellite, etc - see mirror-vm.preflight.sh
-## - 
-## - 
+## - Two NICs must be available on the host, one for the isolated network and one for the internet.
+## - The host must have a static IP address assigned to it on each network.
+##
 ########################################################################################################################
 
 ########################################################################################################################
@@ -918,6 +919,7 @@ EOF
 
   echo "  - All assets for ${VERSION_FULL} downloaded!" 2>&1 | tee -a $LOG_FILE
 
+  ## Mirror the Operator Catalog for this release
   if [ "$MIRROR_OPERATOR_CATALOG" == "true" ]; then
     if [ ! -f "$MIRROR_DIR/downloads/rhcos/${VERSION_FULL}/.operator-catalog-finished" ]; then
       echo "===== Mirroring Operator catalog..." 2>&1 | tee -a $LOG_FILE
@@ -1521,14 +1523,9 @@ echo "  Starting Assisted Installer..." 2>&1 | tee -a $LOG_FILE
 AI_SVC_TEST=$(systemctl is-active assisted-installer)
 if [ "$AI_SVC_TEST" == "active" ]; then
   systemctl restart assisted-installer &>> $LOG_FILE
-  #echo "  Waiting 15s for the Assisted Installer to restart..." 2>&1 | tee -a $LOG_FILE
-  #sleep 15
 else
   systemctl enable --now assisted-installer &>> $LOG_FILE
-  #echo "  Waiting 15s for the Assisted Installer to start..." 2>&1 | tee -a $LOG_FILE
-  #sleep 15
 fi
-set -e
 
 ########################################################################################################################
 ## Create an example install-config.yaml
@@ -1575,6 +1572,9 @@ if [ "$PACKAGE_AND_COMPRESS_ASSETS" == "true" ]; then
   systemctl stop assisted-installer &>> $LOG_FILE
   systemctl stop mirror-registry &>> $LOG_FILE
   systemctl stop dns-go-zones &>> $LOG_FILE
+
+  echo -e "\n===== Creating archive of the Image Registry Container..." 2>&1 | tee -a $LOG_FILE
+  podman save -o ${MIRROR_DIR}/downloads/registry-container.tar quay.io/redhat-emea-ssa-team/registry:2 &>> $LOG_FILE
 
   ## Package into split 7zip files
   if [ "$PACKAGE_AND_COMPRESS_ARCHIVER" == "7zip" ]; then
