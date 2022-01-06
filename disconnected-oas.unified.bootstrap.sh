@@ -1448,7 +1448,7 @@ podman run -dt --pod $ISOLATED_AI_SVC_ENDPOINT --name $ISOLATED_AI_SVC_API_HOSTN
   -v $MIRROR_DIR/downloads/ca.cert.pem:/etc/pki/ca-trust/source/anchors/ca.cert.pem:z \
   --env-file $MIRROR_DIR/ai-svc/volumes/opt/onprem-environment \
   -e DUMMY_IGNITION=False \
-  --restart no \
+  --restart unless-stopped \
   --entrypoint='["/bin/bash", "-c", "update-ca-trust; /assisted-service"]' \
   -m 1024m \
   --authfile ${MIRROR_DIR}/auth/compiled-pull-secret.json \
@@ -1575,6 +1575,9 @@ if [ "$PACKAGE_AND_COMPRESS_ASSETS" == "true" ]; then
 
   echo -e "\n===== Creating archive of the Image Registry Container..." 2>&1 | tee -a $LOG_FILE
   podman save -o ${MIRROR_DIR}/downloads/registry-container.tar quay.io/redhat-emea-ssa-team/registry:2 &>> $LOG_FILE
+
+  echo -e "\n===== Creating archive of the Go Zones DNS Container..." 2>&1 | tee -a $LOG_FILE
+  podman save -o ${MIRROR_DIR}/downloads/dns-container.tar quay.io/kenmoini/go-zones:file-to-bind &>> $LOG_FILE
 
   ## Package into split 7zip files
   if [ "$PACKAGE_AND_COMPRESS_ARCHIVER" == "7zip" ]; then
