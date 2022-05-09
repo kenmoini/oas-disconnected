@@ -114,8 +114,8 @@ export ASSISTED_SERVICE_HOSTNAME="api.openshift.com"
 export ASSISTED_SERVICE_PORT="443" 
 export ASSISTED_SERVICE_PROTOCOL="https"
 export ASSISTED_SERVICE_ENDPOINT="${ASSISTED_SERVICE_PROTOCOL}://${ASSISTED_SERVICE_HOSTNAME}:${ASSISTED_SERVICE_PORT}"
-export ASSISTED_SERVICE_V1_API_PATH="/api/assisted-install/v1"
-export ASSISTED_SERVICE_V1_API="${ASSISTED_SERVICE_ENDPOINT}${ASSISTED_SERVICE_V1_API_PATH}"
+export ASSISTED_SERVICE_V2_API_PATH="/api/assisted-install/v2"
+export ASSISTED_SERVICE_V2_API="${ASSISTED_SERVICE_ENDPOINT}${ASSISTED_SERVICE_V2_API_PATH}"
 
 export LOCAL_REGISTRY="${MIRROR_VM_HOSTNAME}"
 export LOCAL_REPOSITORY="ocp4/openshift4"
@@ -258,7 +258,7 @@ export QUERY_CLUSTER_VERSIONS_REQUEST=$(curl -s --fail \
 --header "Content-Type: application/json" \
 --header "Accept: application/json" \
 --request GET \
-"${ASSISTED_SERVICE_V1_API}/openshift_versions")
+"${ASSISTED_SERVICE_V2_API}/openshift-versions")
 
 if [ -z "$QUERY_CLUSTER_VERSIONS_REQUEST" ]; then
   echo "===== Failed to find supported cluster release version!" 2>&1 | tee -a $LOG_FILE
