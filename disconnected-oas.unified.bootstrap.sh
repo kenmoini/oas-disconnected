@@ -890,7 +890,7 @@ EOF
 EOF
 oc_version() {
   cat <<EOF
-"$VERSION_SHORT":{"display_name":"${VERSION_FULL}","release_version":"${VERSION_FULL}","release_image":"${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE}","rhcos_image":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live.$RHCOS_ARCHITECTURE.iso","rhcos_rootfs":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live-rootfs.$RHCOS_ARCHITECTURE.img","rhcos_version":"$(cat ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/version)","support_level":"production"},
+"$VERSION_SHORT":{"display_name":"${VERSION_FULL}","release_version":"${VERSION_FULL}","release_image":"${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY}:${VERSION_FULL}-${ARCHITECTURE}","rhcos_image":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live.$RHCOS_ARCHITECTURE.iso","rhcos_rootfs":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live-rootfs.$RHCOS_ARCHITECTURE.img","rhcos_version":"$(cat ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/version)","support_level":"production"},
 EOF
 }
   COMPILED_OPENSHIFT_VERSIONS+=$(oc_version)
