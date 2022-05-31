@@ -886,7 +886,7 @@ for version in $(cat ${MIRROR_DIR}/ai-svc/cluster-versions.json | jq -r '.[] | @
 {"openshift_version":"$VERSION_SHORT","cpu_architecture":"${RHCOS_ARCHITECTURE}","url":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live.$RHCOS_ARCHITECTURE.iso","rootfs_url":"https://mirror.${ISOLATED_NETWORK_DOMAIN}/pub/downloads/rhcos/${VERSION_FULL}/rhcos-live-rootfs.$RHCOS_ARCHITECTURE.img","version":"$(cat ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/version)"}
 EOF
   cat > ${MIRROR_DIR}/downloads/rhcos/${VERSION_FULL}/release-image-info.json <<EOF
-{"openshift_version":"$VERSION_SHORT","cpu_architecture":"${RHCOS_ARCHITECTURE}","url":"${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY}:${OCP_RELEASE}-${ARCHITECTURE}","version":"$VERSION_FULL"}
+{"openshift_version":"$VERSION_SHORT","cpu_architecture":"${RHCOS_ARCHITECTURE}","url":"${LOCAL_REGISTRY}.${ISOLATED_NETWORK_DOMAIN}/${LOCAL_REPOSITORY}:${VERSION_FULL}-${ARCHITECTURE}","version":"$VERSION_FULL"}
 EOF
 oc_version() {
   cat <<EOF
